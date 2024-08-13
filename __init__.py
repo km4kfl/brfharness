@@ -2,9 +2,9 @@ import threading
 import queue
 import bladerf
 import numpy as np
-from harness.bladeandnumpy import BladeRFAndNumpy
+from brfharness.bladeandnumpy import BladeRFAndNumpy
 
-def tx_thread(dev, num_buffers, buffer_size, freq, sps, q, qout):
+def tx_thread(dev, num_buffers, buffer_size, freq, sps, q, qout, tx_gain):
     print('[tx-thread] started')
     dev.sync_config(
         bladerf.ChannelLayout.TX_X2,
@@ -21,7 +21,10 @@ def tx_thread(dev, num_buffers, buffer_size, freq, sps, q, qout):
         dev.set_frequency(ch, freq)
         dev.set_bandwidth(ch, sps)
         dev.set_sample_rate(ch, sps)
-        dev.set_gain(ch, -60)
+        # The board is currently only responding to this initial set
+        # of the gain. So, I had to add `tx_gain` as a parameter. I
+        # can't seem to get it to set further below.
+        dev.set_gain(ch, tx_gain)
         print('tx-gain', dev.get_gain(ch))
         dev.enable_module(ch, True)
 
@@ -41,6 +44,7 @@ def tx_thread(dev, num_buffers, buffer_size, freq, sps, q, qout):
                 qout.put(('counter', counter))
                 # We are counting two channels not total samples.
                 counter += samps // 2
+                #print('[tx-thread] calling sync_tx')
                 dev.sync_tx(tx_data, samps)
         else:
             cmd = q.get()
@@ -52,10 +56,12 @@ def tx_thread(dev, num_buffers, buffer_size, freq, sps, q, qout):
                 dev.set_frequency(1, freq)
                 dev.set_frequency(3, freq)
             elif len(cmd) > 0 and cmd[0] == 'data':
+                print('set tx data')
                 tx_data = cmd[1]
             elif len(cmd) > 0 and cmd[0] == 'gain':
                 dev.set_gain(1, cmd[1])
                 dev.set_gain(3, cmd[1])
+                print('set-gain', cmd[1])
 
 def rx_thread(dev, num_buffers, buffer_size, freq, sps, rx, tx):
     print('[rx-thread] started')
@@ -88,7 +94,7 @@ def rx_thread(dev, num_buffers, buffer_size, freq, sps, rx, tx):
         try:
             cmd = rx.get_nowait()
             if cmd[0] == 'request':
-                print(f'[rx-thread] got sample command for {cmd} samples')
+                #print(f'[rx-thread] got sample command for {cmd} samples')
                 sabuf = [sa]
                 sbbuf = [sb]
                 got = len(sa)
@@ -151,8 +157,24 @@ class Card:
     rx_th = None
     slave_th = None
     dev = None
+    buffer_samps = 0
+
+    def clear_buffer_get_samples(self, count):
+        assert type(count) is int
+        assert count > 0
+        self.rx_tx.put(('request', self.buffer_samps))
+        self.rx_tx.put(('request', count))
+        self.rx_rx.get()
+        return self.rx_rx.get()
+
+    def get_samples(self, count):
+        assert type(count) is int
+        assert count > 0
+        self.rx_tx.put(('request', count))
+        return self.rx_rx.get()
 
     def set_tx_data(self, tx_data):
+        assert type(tx_data) is bytes
         self.tx_tx.put(('data', tx_data))
 
     def set_tx_gain(self, gain):
@@ -169,16 +191,18 @@ class Card:
         self.rx_th.join()
         self.slave_th.join()
 
-def setup(serials, sps, freq):
+def setup(serials, sps, freq, initial_tx_gain):
     num_buffers = 16
     buffer_size = 1024 * 32
     buffer_samps = num_buffers * buffer_size
+    buffer_samps = int((num_buffers * buffer_size) // 4)
 
     cards = []
 
     for serial in serials:
         card = Card()
         cards.append(card)
+        card.buffer_samps = buffer_samps
         card.dev = BladeRFAndNumpy(f'libusb:serial={serial}')
         card.tx_tx = queue.Queue()
         card.tx_rx = queue.Queue()
@@ -196,6 +220,7 @@ def setup(serials, sps, freq):
                 sps,
                 card.tx_tx,
                 card.tx_rx,
+                initial_tx_gain,
             ),
             daemon=True
         )
@@ -225,7 +250,5 @@ def setup(serials, sps, freq):
         card.tx_th.start()
         card.rx_th.start()
         card.slave_th.start()
-
-    buffer_samps = int((num_buffers * buffer_size) // 4)
 
     return cards, buffer_samps
