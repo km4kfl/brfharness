@@ -36,3 +36,9 @@ single card or more than two.
     # Grab some samples from the first card.
     rx_counter, rx1, rx2 = cards[0].clear_buffer_get_samples(sps)
 ```
+
+# Why Not Use Meta
+
+I tried using it but it was broken for RX on my A4 boards. It had a off by one
+issue and the entire pipeline in C would stall. I debugged the issue as far as
+the FPGA. I'm not an FPGA programmer so I had trouble locating the issue.
